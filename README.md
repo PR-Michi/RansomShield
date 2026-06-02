@@ -17,15 +17,17 @@ RansomShield は、経済産業省・IPA が推奨するランサムウェア対
 
 ---
 
-### 機能一覧（5モジュール）
+### 機能一覧（5モジュール + 2サブ機能）
 
 | # | 機能 | 内容 |
 |---|------|------|
 | 1 | **CFA（コントロールドフォルダーアクセス）** | ランサムウェアによる重要フォルダへの書き込みをブロック |
 | 2 | **SMB / 管理共有ブロック** | 社内ネットワーク経由の横展開を防止 |
+|   | &nbsp;&nbsp;└ 信頼デバイス管理 *(v1.1新機能)* | 複合機・プリンターなど特定IPのみSMBアクセスを許可 |
 | 3 | **RDP 無効化** | リモートデスクトップ経由の侵入を遮断 |
 | 4 | **USB AutoRun 無効化** | USBメモリ経由の自動実行感染を防止 |
 | 5 | **UAC 最大レベル** | 権限昇格による被害拡大を抑制 |
+| + | **ブロック履歴ログ閲覧** *(v1.1新機能)* | 各機能がブロックした記録をCLIで確認 |
 
 ---
 
@@ -80,7 +82,13 @@ HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
   AutoShareWks = 0  (DWORD)   ← 再起動後に管理共有を自動作成しない
 ```
 
----
+**v1.1 新機能: 信頼デバイス管理**  
+SMBブロック中でも、複合機・プリンターなどの業務機器に限ってSMBアクセスを許可できます。  
+「ブロックルールのRemoteAddressを信頼IPの補集合で再構築」する方式なので、  
+Windowsファイアウォールの」BLOCKルール > ALLOWルール『の場合でも確実に務めます。  
+登録情報は `HKLM:\SOFTWARE\RansomShield` に永続保存されます。
+
+**操作手順**：個別設定 `[4]` → `[2] SMB` → `[2] 信頼デバイス管理` → `[A] IPを追加`
 
 #### 3. RDP 無効化
 
@@ -261,17 +269,30 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ```
 ========================================================
-  RansomShield  ver 1.0.0
+  RansomShield  ver 1.1.0
   ランサムウェア防衛ツール
 ========================================================
 
-  [保護中  OK]  [1] CFA（コントロールドフォルダーアクセス）
-  [保護中  OK]  [2] SMB/管理共有ブロック
-  [保護中  OK]  [3] RDP 無効化
-  [保護中  OK]  [4] USB AutoRun 無効化
-  [保護中  OK]  [5] UAC 最大レベル
+  防衛スコア: 5/5
 
-  防衛スコア: 5/5  [完全防衛]
+  [1] 診断             - セキュリティ状態を確認
+  [2] 全防衛設定を適用   - ランサムウェア対策を一括有効化
+  [3] 全設定を解除       - 設定を元に戻す
+  [4] 個別設定           - 機能を個別にON/OFF
+  [5] ブロック履歴ログ   - CFA/SMB/RDP/USB/UAC のブロック記録を確認
+  --------------------------------------------------------
+  [Q] 終了
+```
+
+**[4] 個別設定 → [2] SMBブロック ON 時のサブメニュー:**
+```
+  ■ SMB/管理共有ブロック 設定
+  信頼デバイス: 1件 登録中
+    - 192.168.1.100
+
+  [1] SMBブロックを解除
+  [2] 信頼デバイス管理 - 複合機・プリンターなどのIPを登録
+  [B] 戻る
 ```
 
 ---
@@ -296,6 +317,31 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ### ライセンス
 
 [MIT License](LICENSE)
+
+---
+
+### 変更履歴
+
+#### v1.1.0 (2026-06-02)
+- **新機能: SMB 信頼デバイス管理**  
+  複合機・プリンターなど特定のIPアドレスのみSMBアクセスを許可できるようになりました。  
+  SMBブロックを有効にしたまま、スキャン保存（スキャン→PC共有フォルダへPDF/JPG転送）が可能です。  
+  Windowsファイアウォールのブロックルール（`RemoteAddress`）を信頼IP補集合で再構築する方式を採用。
+  登録済みIPは `HKLM:\SOFTWARE\RansomShield` にJSON形式で永続保存。
+
+- **新機能: ブロック履歴ログ閲覧**  
+  メインメニュー `[5]` から各防衛機能のブロック記録を一覧表示できます。
+  | ログ | データソース |
+  |------|-------------|
+  | CFA ブロック | Windows Defender OperationalログEventID 1123 |
+  | SMB ブロック | Windowsファイアウォールログ (`pfirewall.log`) / EventID 5157 |
+  | RDP ブロック | TerminalServicesログEventID 261 / セキュリティログEventID 4625 |
+  | USB 接続履歴 | Microsoft-Windows-DriverFrameworks-UserMode EventID 2003 |
+  | UAC 昇格履歴 | セキュリティログEventID 4688（昇格トークン） |
+
+#### v1.0.0 (2026-05-23)
+- 初回リリース
+- CFA / SMBハードニング / RDP無効化 / AutoRun無効化 / UAC最大レベル
 
 ---
 
@@ -325,8 +371,6 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/fuchigami_michiaki)
 
-📝 **[開発ストーリーを Qiita で読む](https://qiita.com/fuchigami-michiaki/items/f0f054830067ecde6037)**
-
 ---
 
 ---
@@ -342,15 +386,17 @@ It runs with administrator privileges and provides a CLI menu for managing each 
 
 ---
 
-### Features (5 Modules)
+### Features (5 Modules + 2 Sub-features)
 
 | # | Feature | Description |
 |---|---------|-------------|
 | 1 | **CFA (Controlled Folder Access)** | Blocks ransomware from writing to protected folders |
 | 2 | **SMB / Admin Share Block** | Prevents lateral movement over local networks |
+|   | &nbsp;&nbsp;└ Trusted Device Management *(v1.1 new)* | Allow specific IPs (e.g., MFP/printer) while keeping SMB blocked |
 | 3 | **RDP Disable** | Blocks intrusion via Remote Desktop Protocol |
 | 4 | **USB AutoRun Disable** | Prevents auto-execution malware via USB drives |
 | 5 | **UAC Maximum Level** | Limits privilege escalation damage |
+| + | **Block History Log Viewer** *(v1.1 new)* | View block records for all 5 modules from the CLI |
 
 ---
 
@@ -402,6 +448,30 @@ See [DISCLAIMER.md](DISCLAIMER.md) for full details.
 
 ---
 
+### Changelog
+
+#### v1.1.0 (2026-06-02)
+- **New: SMB Trusted Device Management**  
+  Whitelist specific IP addresses (e.g., multifunction printer) to allow SMB access while keeping the block active for all other devices.  
+  Uses firewall BLOCK rule `RemoteAddress` complement ranges — works even when BLOCK rules take precedence over ALLOW rules in Windows Firewall.  
+  Registered IPs are persisted as JSON in `HKLM:\SOFTWARE\RansomShield`.
+
+- **New: Block History Log Viewer**  
+  Main menu `[5]` now shows block records for all 5 defense modules:
+  | Log | Data Source |
+  |-----|-------------|
+  | CFA Blocks | Windows Defender Operational log EventID 1123 |
+  | SMB Blocks | Windows Firewall log (`pfirewall.log`) / EventID 5157 |
+  | RDP Blocks | TerminalServices log EventID 261 / Security EventID 4625 |
+  | USB History | DriverFrameworks-UserMode EventID 2003 |
+  | UAC Elevation | Security log EventID 4688 (elevated token) |
+
+#### v1.0.0 (2026-05-23)
+- Initial release
+- CFA / SMB hardening / RDP disable / AutoRun disable / UAC maximum
+
+---
+
 ### 📖 Why I Built This
 
 One day, a business partner of mine was hit by ransomware.
@@ -427,5 +497,3 @@ Every line of code is open. There is nothing to hide. If this tool can protect e
 If this tool helped you, consider supporting continued development.
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/fuchigami_michiaki)
-
-📝 **[Read the development story on Qiita](https://qiita.com/fuchigami-michiaki/items/f0f054830067ecde6037)**

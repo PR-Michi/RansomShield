@@ -1,5 +1,5 @@
 ﻿# ===========================================================
-# RansomShield.ps1  v1.0.0
+# RansomShield.ps1  v1.1.0
 # ===========================================================
 # (C) 2026  All rights reserved.
 # ※ このスクリプトはPS2EXEでEXE化して配布してください
@@ -21,7 +21,7 @@ if (-not $isAdmin) {
 #endregion
 
 #region --- 定数 ---
-$VERSION = '1.0.0'
+$VERSION = '1.1.0'
 $PRODUCT = 'RansomShield'
 $LINE    = '=' * 56
 $SEP     = '-' * 56
@@ -132,10 +132,7 @@ function Enable-SmbHardening {
             Write-Host ("    {0} 共有削除" -f $n)
         }
     }
-    if (-not (Get-NetFirewallRule -DisplayName 'Block-SMB-Inbound-445' -EA SilentlyContinue)) {
-        New-NetFirewallRule -DisplayName 'Block-SMB-Inbound-445' `
-            -Direction Inbound -Protocol TCP -LocalPort 445 -Action Block -Profile Any | Out-Null
-    }
+    Update-SmbBlockRule   # 信頼IPを考慮してルールを構築
     Write-Host "    SMB/管理共有ブロック 完了" -ForegroundColor Green
 }
 
@@ -145,6 +142,141 @@ function Disable-SmbHardening {
     Remove-NetFirewallRule -DisplayName 'Block-SMB-Inbound-445' -EA SilentlyContinue
     Write-Host "    SMB/管理共有 解除完了（C$は次回起動時に復元）" -ForegroundColor Magenta
 }
+
+# --- SMB 信頼IP管理 ---
+
+$SMB_TRUST_REG = 'HKLM:\SOFTWARE\RansomShield'
+
+function Get-SmbTrustedIPs {
+    try {
+        $raw = (Get-ItemProperty $SMB_TRUST_REG -Name SmbTrustedIPs -EA Stop).SmbTrustedIPs
+        return @($raw | ConvertFrom-Json)
+    } catch { return @() }
+}
+
+function Save-SmbTrustedIPs([string[]]$IPs) {
+    if (-not (Test-Path $SMB_TRUST_REG)) { New-Item $SMB_TRUST_REG -Force | Out-Null }
+    Set-ItemProperty $SMB_TRUST_REG -Name SmbTrustedIPs -Value ($IPs | ConvertTo-Json -Compress) -Type String
+}
+
+function Get-IPv4RangesExcluding([string[]]$ExcludeIPs) {
+    # 指定IPを除いた全IPv4範囲を返す（BLOCKルールのRemoteAddressに使用）
+    $sorted = $ExcludeIPs | ForEach-Object {
+        $p = $_ -split '\.'
+        [int64]$p[0]*16777216 + [int64]$p[1]*65536 + [int64]$p[2]*256 + [int64]$p[3]
+    } | Sort-Object -Unique
+
+    $ranges = [System.Collections.Generic.List[string]]::new()
+    $start  = [int64]0
+
+    function IntToIP([int64]$n) {
+        '{0}.{1}.{2}.{3}' -f [int]($n -shr 24), [int](($n -shr 16) -band 0xFF), [int](($n -shr 8) -band 0xFF), [int]($n -band 0xFF)
+    }
+
+    foreach ($ip in $sorted) {
+        if ($ip -gt $start) {
+            $ranges.Add( "$(IntToIP $start)-$(IntToIP ($ip - 1))" )
+        }
+        $start = $ip + 1
+    }
+    if ($start -le 4294967295) {
+        $ranges.Add( "$(IntToIP $start)-255.255.255.255" )
+    }
+    return $ranges.ToArray()
+}
+
+function Update-SmbBlockRule {
+    # BLOCKルールを信頼IPを除外した形で再構築
+    Remove-NetFirewallRule -DisplayName 'Block-SMB-Inbound-445' -EA SilentlyContinue
+
+    $trusted = Get-SmbTrustedIPs
+    if ($trusted.Count -eq 0) {
+        # 信頼IP未設定: 全ブロック
+        New-NetFirewallRule -DisplayName 'Block-SMB-Inbound-445' `
+            -Direction Inbound -Protocol TCP -LocalPort 445 `
+            -RemoteAddress Any -Action Block -Profile Any | Out-Null
+    } else {
+        # 信頼IP設定あり: 信頼IP以外をブロック
+        $blockRanges = Get-IPv4RangesExcluding -ExcludeIPs $trusted
+        if ($blockRanges.Count -gt 0) {
+            New-NetFirewallRule -DisplayName 'Block-SMB-Inbound-445' `
+                -Direction Inbound -Protocol TCP -LocalPort 445 `
+                -RemoteAddress $blockRanges -Action Block -Profile Any | Out-Null
+        }
+        Write-Host ("    信頼IP {0}件を除外してSMBブロックを再設定しました" -f $trusted.Count) -ForegroundColor Cyan
+    }
+}
+
+function Show-SmbExceptionMenu {
+    while ($true) {
+        Write-Header
+        Write-Host "  ■ SMB 信頼デバイス管理 (複合機・プリンターなど)" -ForegroundColor Yellow
+        Write-Sep
+        Write-Host "  ここに登録したIPアドレスのみ、SMBブロック中でも" -ForegroundColor DarkGray
+        Write-Host "  ファイル転送（スキャン保存など）が可能になります。" -ForegroundColor DarkGray
+        Write-Host ""
+
+        $trusted = Get-SmbTrustedIPs
+        if ($trusted.Count -eq 0) {
+            Write-Host "  登録済み信頼IP: なし (全ブロック中)" -ForegroundColor Yellow
+        } else {
+            Write-Host "  登録済み信頼IP:" -ForegroundColor White
+            for ($i = 0; $i -lt $trusted.Count; $i++) {
+                Write-Host ("    [{0}] {1}" -f ($i + 1), $trusted[$i]) -ForegroundColor Cyan
+            }
+        }
+
+        Write-Host ""
+        Write-Sep
+        Write-Host "  [A] IPアドレスを追加 (複合機・プリンターなど)"
+        Write-Host "  [D] IPアドレスを削除"
+        Write-Host "  [B] 戻る"
+        Write-Host ""
+        $c = Read-Host "  選択"
+
+        switch ($c.ToUpper()) {
+            'A' {
+                $ip = (Read-Host "  追加するIPアドレスを入力 (例: 192.168.1.100)").Trim()
+                if ($ip -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
+                    $list = @(Get-SmbTrustedIPs) + $ip | Select-Object -Unique
+                    Save-SmbTrustedIPs -IPs $list
+                    # SMBブロックが有効なら即座にルール更新
+                    if (Get-NetFirewallRule -DisplayName 'Block-SMB-Inbound-445' -EA SilentlyContinue) {
+                        Update-SmbBlockRule
+                    }
+                    Write-Host ("  {0} を信頼IPに追加しました。" -f $ip) -ForegroundColor Green
+                } else {
+                    Write-Host "  無効なIPアドレスです。" -ForegroundColor Red
+                }
+                Pause-Any
+            }
+            'D' {
+                $trusted = Get-SmbTrustedIPs
+                if ($trusted.Count -eq 0) {
+                    Write-Host "  削除するIPがありません。" -ForegroundColor Yellow
+                    Pause-Any
+                } else {
+                    $idx = Read-Host "  削除する番号を入力"
+                    $i = [int]$idx - 1
+                    if ($i -ge 0 -and $i -lt $trusted.Count) {
+                        $removed = $trusted[$i]
+                        $newList = @($trusted | Where-Object { $_ -ne $removed })
+                        Save-SmbTrustedIPs -IPs $newList
+                        if (Get-NetFirewallRule -DisplayName 'Block-SMB-Inbound-445' -EA SilentlyContinue) {
+                            Update-SmbBlockRule
+                        }
+                        Write-Host ("  {0} を削除しました。" -f $removed) -ForegroundColor Magenta
+                    } else {
+                        Write-Host "  無効な番号です。" -ForegroundColor Red
+                    }
+                    Pause-Any
+                }
+            }
+            'B' { return }
+        }
+    }
+}
+
 
 # -- コントロールドフォルダーアクセス --
 function Enable-Cfa {
@@ -312,8 +444,32 @@ function Show-IndividualMenu {
                 Pause-Any
             }
             '2' {
-                if ($s.smb) { Disable-SmbHardening } else { Enable-SmbHardening }
-                Pause-Any
+                if ($s.smb) {
+                    # SMB ON 時: サブメニューで「解除」or「信頼デバイス管理」を選択
+                    Write-Header
+                    Write-Host "  ■ SMB/管理共有ブロック 設定" -ForegroundColor Yellow
+                    Write-Sep
+                    $trusted = Get-SmbTrustedIPs
+                    if ($trusted.Count -gt 0) {
+                        Write-Host ("  信頼デバイス: {0}件 登録中" -f $trusted.Count) -ForegroundColor Cyan
+                        $trusted | ForEach-Object { Write-Host ("    - {0}" -f $_) -ForegroundColor Cyan }
+                    } else {
+                        Write-Host "  信頼デバイス: なし (全IPブロック中)" -ForegroundColor Yellow
+                    }
+                    Write-Host ""
+                    Write-Host "  [1] SMBブロックを解除"
+                    Write-Host "  [2] 信頼デバイス管理 - 複合機・プリンターなどのIPを登録"
+                    Write-Host "  [B] 戻る"
+                    Write-Host ""
+                    $sub = Read-Host "  選択"
+                    switch ($sub.ToUpper()) {
+                        '1' { Disable-SmbHardening; Pause-Any }
+                        '2' { Show-SmbExceptionMenu }
+                    }
+                } else {
+                    Enable-SmbHardening
+                    Pause-Any
+                }
             }
             '3' {
                 if ($s.rdp) { Enable-Rdp } else {
@@ -335,6 +491,433 @@ function Show-IndividualMenu {
     }
 }
 
+# SMBブロック履歴
+function Show-SmbBlockLog {
+    Write-Header
+    Write-Host "  ■ SMB / ポート445 ブロック履歴" -ForegroundColor Yellow
+    Write-Sep
+
+    $found = $false
+
+    # --- 優先1: Windowsファイアウォールログファイル ---
+    $fwLog = "$env:SystemRoot\System32\LogFiles\Firewall\pfirewall.log"
+    if (Test-Path $fwLog) {
+        Write-Host "  ファイアウォールログを解析中..." -ForegroundColor DarkGray
+        $drops = Get-Content $fwLog -ErrorAction SilentlyContinue | Where-Object {
+            $_ -notmatch '^#'
+        } | ForEach-Object {
+            $p = $_ -split '\s+'
+            if ($p.Count -ge 8 -and $p[2] -eq 'DROP' -and $p[7] -eq '445') { $_ }
+        }
+        if ($drops -and @($drops).Count -gt 0) {
+            $found = $true
+            $total = @($drops).Count
+            Write-Host ""
+            Write-Host ("  ポート445 DROPブロック件数: {0} 件" -f $total) -ForegroundColor Red
+            Write-Sep
+            Write-Host "  ▼ 最近のブロック記録 (最新15件):" -ForegroundColor White
+            Write-Host ""
+            Write-Host ("  {0,-18} {1,-18} {2,-8} {3}" -f "日時", "送信元IP", "Src.Port", "プロトコル") -ForegroundColor DarkGray
+            Write-Host ("  " + ('-' * 60)) -ForegroundColor DarkGray
+            @($drops) | Select-Object -Last 15 | ForEach-Object {
+                $p = $_ -split '\s+'
+                Write-Host ("  {0,-18} {1,-18} {2,-8} {3}" -f "$($p[0]) $($p[1])", $p[4], $p[5], $p[3])
+            }
+            Write-Sep
+            Write-Host ""
+            Write-Host "  ▼ 送信元IP 上位5件:" -ForegroundColor Yellow
+            Write-Host ""
+            @($drops) | ForEach-Object { ($_ -split '\s+')[4] } |
+                Group-Object | Sort-Object Count -Descending | Select-Object -First 5 | ForEach-Object {
+                $bar   = [string]::new([char]0x2588, [Math]::Min($_.Count, 35))
+                $color = if ($_.Count -ge 5) { 'Red' } else { 'Yellow' }
+                Write-Host ("    {0,4}回  " -f $_.Count) -NoNewline
+                Write-Host $bar -NoNewline -ForegroundColor $color
+                Write-Host ("  {0}" -f $_.Name)
+            }
+        }
+    }
+
+    # --- 優先2: セキュリティログ EventID 5157 ---
+    if (-not $found) {
+        Write-Host "  セキュリティログ (EventID:5157) を確認中..." -ForegroundColor DarkGray
+        try {
+            $evts = Get-WinEvent -FilterHashtable @{
+                LogName   = 'Security'; Id = 5157
+                StartTime = (Get-Date).AddDays(-30)
+            } -MaxEvents 2000 -ErrorAction Stop | Where-Object {
+                try {
+                    $x = [xml]$_.ToXml()
+                    ($x.Event.EventData.Data | Where-Object { $_.Name -eq 'DestPort' }).'#text' -eq '445'
+                } catch { $false }
+            }
+            if (@($evts).Count -gt 0) {
+                $found = $true
+                Write-Host ""
+                Write-Host ("  SMB(445) ブロック件数 (過去30日): {0} 件" -f @($evts).Count) -ForegroundColor Red
+                Write-Sep
+                $evts | Select-Object -First 10 | ForEach-Object {
+                    $x = [xml]$_.ToXml()
+                    $src = ($x.Event.EventData.Data | Where-Object { $_.Name -eq 'SourceAddress' }).'#text'
+                    Write-Host ("  {0}  送信元: {1}" -f $_.TimeCreated.ToString('MM/dd HH:mm:ss'), $src)
+                }
+            }
+        } catch { }
+    }
+
+    # --- データなし ---
+    if (-not $found) {
+        Write-Host ""
+        Write-Host "  SMBブロックの記録が見つかりません。" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  ログを有効にするには (どちらか一方):" -ForegroundColor Cyan
+        Write-Host "  [方法A] ファイアウォールログ有効化:" -ForegroundColor White
+        Write-Host "    Windows セキュリティ → ファイアウォール → 詳細設定" -ForegroundColor DarkGray
+        Write-Host "    → プロパティ → ログ → ドロップされたパケット: はい" -ForegroundColor DarkGray
+        Write-Host "  [方法B] 監査ポリシー有効化 (管理者PowerShell):" -ForegroundColor White
+        Write-Host "    auditpol /set /subcategory:`"フィルタリングプラットフォームの接続`" /failure:enable" -ForegroundColor DarkGray
+    }
+
+    Write-Host ""
+    Pause-Any
+}
+
+# RDP接続試行履歴
+function Show-RdpBlockLog {
+    Write-Header
+    Write-Host "  ■ RDP 接続試行履歴 (ポート3389)" -ForegroundColor Yellow
+    Write-Sep
+
+    $found = $false
+
+    # --- 優先1: TerminalServices-RemoteConnectionManager ---
+    try {
+        $evts = Get-WinEvent -LogName 'Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational' `
+                             -ErrorAction Stop |
+                Where-Object { $_.Id -eq 261 } |
+                Select-Object -First 200
+        if (@($evts).Count -gt 0) {
+            $found = $true
+            $total    = @($evts).Count
+            $today    = (Get-Date).Date
+            $todayCnt = @($evts | Where-Object { $_.TimeCreated -ge $today }).Count
+            $weekCnt  = @($evts | Where-Object { $_.TimeCreated -ge $today.AddDays(-7) }).Count
+
+            Write-Host ""
+            Write-Host ("  RDP接続試行件数 (直近200件まで): {0} 件" -f $total) -ForegroundColor Red
+            Write-Host ("  本日:{0,4}件  /  過去7日:{1,4}件" -f $todayCnt, $weekCnt) -ForegroundColor Yellow
+            Write-Sep
+            Write-Host "  ▼ 最近の接続試行 (最新15件):" -ForegroundColor White
+            Write-Host ""
+            Write-Host ("  {0,-17} {1}" -f "日時", "内容") -ForegroundColor DarkGray
+            Write-Host ("  " + ('-' * 65)) -ForegroundColor DarkGray
+            $evts | Select-Object -First 15 | ForEach-Object {
+                $msg = ($_.Message -split "`n")[0] -replace '^\s+',''
+                if ($msg.Length -gt 55) { $msg = $msg.Substring(0, 52) + '...' }
+                Write-Host ("  {0,-17} {1}" -f $_.TimeCreated.ToString('MM/dd HH:mm:ss'), $msg)
+            }
+        }
+    } catch { }
+
+    # --- 優先2: セキュリティログ EventID 4625 LogonType=10 (RDP認証失敗) ---
+    if (-not $found) {
+        try {
+            $evts = Get-WinEvent -FilterHashtable @{
+                LogName   = 'Security'; Id = 4625
+                StartTime = (Get-Date).AddDays(-30)
+            } -MaxEvents 500 -ErrorAction Stop | Where-Object {
+                try {
+                    $x = [xml]$_.ToXml()
+                    ($x.Event.EventData.Data | Where-Object { $_.Name -eq 'LogonType' }).'#text' -eq '10'
+                } catch { $false }
+            }
+            if (@($evts).Count -gt 0) {
+                $found = $true
+                Write-Host ""
+                Write-Host ("  RDP認証失敗 (過去30日): {0} 件" -f @($evts).Count) -ForegroundColor Red
+                Write-Sep
+                $evts | Select-Object -First 10 | ForEach-Object {
+                    $x    = [xml]$_.ToXml()
+                    $user = ($x.Event.EventData.Data | Where-Object { $_.Name -eq 'TargetUserName' }).'#text'
+                    $ip   = ($x.Event.EventData.Data | Where-Object { $_.Name -eq 'IpAddress' }).'#text'
+                    Write-Host ("  {0}  ユーザー: {1,-20} 送信元: {2}" -f $_.TimeCreated.ToString('MM/dd HH:mm:ss'), $user, $ip)
+                }
+            }
+        } catch { }
+    }
+
+    # --- データなし ---
+    if (-not $found) {
+        Write-Host ""
+        Write-Host "  RDP接続試行の記録が見つかりません。" -ForegroundColor Green
+        Write-Host "  RDPが正常にブロックされているか、接続試行がない状態です。" -ForegroundColor DarkGray
+    }
+
+    Write-Host ""
+    Pause-Any
+}
+
+# AutoRun - USB接続履歴（ブロック記録代替）
+function Show-AutoRunLog {
+    Write-Header
+    Write-Host "  ■ USB/外部メディア 接続履歴" -ForegroundColor Yellow
+    Write-Sep
+    Write-Host "  AutoRun抑止はレジストリ設定のため、ブロックイベントは記録されません。" -ForegroundColor DarkGray
+    Write-Host "  代わりに USB デバイスの接続履歴を表示します。" -ForegroundColor DarkGray
+    Write-Host ""
+
+    try {
+        $evts = Get-WinEvent -LogName 'Microsoft-Windows-DriverFrameworks-UserMode/Operational' `
+                             -ErrorAction Stop |
+                Where-Object { $_.Id -eq 2003 } |
+                Select-Object -First 50
+        if (@($evts).Count -gt 0) {
+            Write-Host ("  USB/外部デバイス接続件数 (直近50件): {0} 件" -f @($evts).Count) -ForegroundColor Yellow
+            Write-Sep
+            Write-Host "  ▼ 最近の接続記録 (最新15件):" -ForegroundColor White
+            Write-Host ""
+            $evts | Select-Object -First 15 | ForEach-Object {
+                $msg = ($_.Message -split "`n")[0] -replace '^\s+',''
+                if ($msg.Length -gt 60) { $msg = $msg.Substring(0,57) + '...' }
+                Write-Host ("  {0,-17} {1}" -f $_.TimeCreated.ToString('MM/dd HH:mm:ss'), $msg)
+            }
+        } else {
+            Write-Host "  USB接続の記録はありません。" -ForegroundColor Green
+        }
+    } catch {
+        # System logからUSBストレージを確認
+        try {
+            $evts = Get-WinEvent -FilterHashtable @{
+                LogName = 'System'; Id = 20001
+            } -MaxEvents 20 -ErrorAction Stop
+            $evts | Select-Object -First 10 | ForEach-Object {
+                Write-Host ("  {0,-17} {1}" -f $_.TimeCreated.ToString('MM/dd HH:mm:ss'), $_.Message.Substring(0, [Math]::Min(60, $_.Message.Length)))
+            }
+        } catch {
+            Write-Host "  USB接続履歴ログが取得できませんでした。" -ForegroundColor DarkGray
+        }
+    }
+
+    Write-Host ""
+    Write-Host "  AutoRunが有効の場合: USB挿入時に自動実行プログラムが起動します。" -ForegroundColor Cyan
+    Write-Host "  現在の設定 (NoDriveTypeAutoRun=255) により自動実行は抑止中です。" -ForegroundColor Cyan
+    Write-Host ""
+    Pause-Any
+}
+
+# UAC - 管理者昇格ログ
+function Show-UacLog {
+    Write-Header
+    Write-Host "  ■ UAC 管理者操作ログ" -ForegroundColor Yellow
+    Write-Sep
+    Write-Host "  UACの「拒否」クリックはWindowsに記録されません。" -ForegroundColor DarkGray
+    Write-Host "  代わりに管理者権限での実行が承認されたプロセスを表示します。" -ForegroundColor DarkGray
+    Write-Host ""
+
+    try {
+        $evts = Get-WinEvent -FilterHashtable @{
+            LogName   = 'Security'; Id = 4688
+            StartTime = (Get-Date).AddDays(-7)
+        } -MaxEvents 200 -ErrorAction Stop | Where-Object {
+            try {
+                $x = [xml]$_.ToXml()
+                ($x.Event.EventData.Data | Where-Object { $_.Name -eq 'TokenElevationType' }).'#text' -eq '%%1937'
+                # %%1937 = TokenElevationTypeFull (完全な管理者トークン)
+            } catch { $false }
+        }
+        if (@($evts).Count -gt 0) {
+            Write-Host ("  管理者昇格で起動したプロセス (過去7日): {0} 件" -f @($evts).Count) -ForegroundColor Yellow
+            Write-Sep
+            Write-Host "  ▼ 最近の昇格実行 (最新15件):" -ForegroundColor White
+            Write-Host ""
+            Write-Host ("  {0,-17} {1}" -f "日時", "実行プログラム") -ForegroundColor DarkGray
+            Write-Host ("  " + ('-' * 65)) -ForegroundColor DarkGray
+            $evts | Select-Object -First 15 | ForEach-Object {
+                $x    = [xml]$_.ToXml()
+                $proc = ($x.Event.EventData.Data | Where-Object { $_.Name -eq 'NewProcessName' }).'#text'
+                $proc = [System.IO.Path]::GetFileName($proc)
+                Write-Host ("  {0,-17} {1}" -f $_.TimeCreated.ToString('MM/dd HH:mm:ss'), $proc)
+            }
+        } else {
+            Write-Host "  管理者昇格の記録がありません。" -ForegroundColor Green
+            Write-Host "  または プロセス生成の監査が無効です。" -ForegroundColor DarkGray
+            Write-Host ""
+            Write-Host "  監査を有効にするには (管理者PowerShell):" -ForegroundColor Cyan
+            Write-Host "    auditpol /set /subcategory:`"プロセス作成`" /success:enable" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Host "  セキュリティログの取得に失敗しました。" -ForegroundColor Red
+        Write-Host ("  詳細: {0}" -f $_.Exception.Message) -ForegroundColor DarkGray
+    }
+
+    Write-Host ""
+    Pause-Any
+}
+
+# ブロック履歴 統合メニュー
+function Show-BlockLogMenu {
+    while ($true) {
+        Write-Header
+        Write-Host "  ■ セキュリティブロック履歴" -ForegroundColor Yellow
+        Write-Sep
+
+        # 各機能の直近件数をサマリー表示
+        $cfaCnt  = try { @(Get-WinEvent -LogName 'Microsoft-Windows-Windows Defender/Operational' -EA Stop | Where-Object { $_.Id -eq 1123 } | Select-Object -First 1).Count } catch { '?' }
+        $todayStr = (Get-Date).Date.ToString('yyyy-MM-dd')
+        Write-Host ("  {0,-6} {1,-10} {2}" -f "番号", "件数(累計)", "機能") -ForegroundColor DarkGray
+        Write-Sep
+
+        # CFA
+        $cfaTotal = try { @(Get-WinEvent -LogName 'Microsoft-Windows-Windows Defender/Operational' -EA Stop | Where-Object { $_.Id -eq 1123 }).Count } catch { '-' }
+        $cfaColor = if ($cfaTotal -is [int] -and $cfaTotal -gt 0) { 'Red' } else { 'Green' }
+        Write-Host "  [1]  " -NoNewline
+        Write-Host ("{0,-10}" -f "$cfaTotal 件") -NoNewline -ForegroundColor $cfaColor
+        Write-Host "  CFA  暗号化ブロック (ファイル書き込み遮断)"
+
+        # SMB
+        $fwLog  = "$env:SystemRoot\System32\LogFiles\Firewall\pfirewall.log"
+        $smbCnt = if (Test-Path $fwLog) {
+            try { @(Get-Content $fwLog -EA Stop | Where-Object { $_ -notmatch '^#' } | Where-Object { ($_ -split '\s+')[2] -eq 'DROP' -and ($_ -split '\s+')[7] -eq '445' }).Count } catch { '?' }
+        } else { '(ログ未設定)' }
+        $smbColor = if ($smbCnt -is [int] -and $smbCnt -gt 0) { 'Red' } elseif ($smbCnt -is [int]) { 'Green' } else { 'Yellow' }
+        Write-Host "  [2]  " -NoNewline
+        Write-Host ("{0,-10}" -f "$smbCnt 件") -NoNewline -ForegroundColor $smbColor
+        Write-Host "  SMB  ポート445ブロック (共有フォルダー攻撃)"
+
+        # RDP
+        $rdpCnt = try { @(Get-WinEvent -LogName 'Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational' -EA Stop | Where-Object { $_.Id -eq 261 } | Select-Object -First 200).Count } catch { '-' }
+        $rdpColor = if ($rdpCnt -is [int] -and $rdpCnt -gt 0) { 'Yellow' } else { 'Green' }
+        Write-Host "  [3]  " -NoNewline
+        Write-Host ("{0,-10}" -f "$rdpCnt 件") -NoNewline -ForegroundColor $rdpColor
+        Write-Host "  RDP  接続試行 (遠隔侵入試み)"
+
+        # AutoRun
+        Write-Host "  [4]  " -NoNewline
+        Write-Host ("{0,-10}" -f "(接続履歴)") -NoNewline -ForegroundColor DarkGray
+        Write-Host "  USB  外部メディア接続履歴"
+
+        # UAC
+        Write-Host "  [5]  " -NoNewline
+        Write-Host ("{0,-10}" -f "(昇格ログ)") -NoNewline -ForegroundColor DarkGray
+        Write-Host "  UAC  管理者昇格 実行ログ"
+
+        Write-Sep
+        Write-Host "  [B] 戻る"
+        Write-Host ""
+        $c = Read-Host "  番号を選択"
+        switch ($c.ToUpper()) {
+            '1' { Show-CfaBlockLog }
+            '2' { Show-SmbBlockLog }
+            '3' { Show-RdpBlockLog }
+            '4' { Show-AutoRunLog  }
+            '5' { Show-UacLog      }
+            'B' { return }
+        }
+    }
+}
+
+
+function Show-CfaBlockLog {
+    param([int]$MaxRecords = 500)
+    Write-Header
+    Write-Host "  ■ CFA ブロック履歴レポート" -ForegroundColor Yellow
+    Write-Sep
+    Write-Host "  Windowsイベントログ (EventID:1123) を取得中..." -ForegroundColor DarkGray
+
+    try {
+        $events = Get-WinEvent -LogName 'Microsoft-Windows-Windows Defender/Operational' `
+                               -ErrorAction Stop |
+                  Where-Object { $_.Id -eq 1123 } |
+                  Select-Object -First $MaxRecords
+    } catch {
+        Write-Host ""
+        Write-Host "  イベントログの取得に失敗しました。" -ForegroundColor Red
+        Write-Host ("  詳細: {0}" -f $_.Exception.Message) -ForegroundColor DarkGray
+        Pause-Any
+        return
+    }
+
+    Write-Host ""
+    if (-not $events -or @($events).Count -eq 0) {
+        Write-Host "  ブロック記録はありません。" -ForegroundColor Green
+        Write-Host "  CFAが無効、またはブロックが一度も発生していない状態です。" -ForegroundColor DarkGray
+        Pause-Any
+        return
+    }
+
+    $total    = @($events).Count
+    $today    = (Get-Date).Date
+    $todayCnt = @($events | Where-Object { $_.TimeCreated -ge $today }).Count
+    $weekCnt  = @($events | Where-Object { $_.TimeCreated -ge $today.AddDays(-7) }).Count
+    $monCnt   = @($events | Where-Object { $_.TimeCreated -ge $today.AddDays(-30) }).Count
+
+    Write-Host ("  取得件数 (最大{0}件): " -f $MaxRecords) -NoNewline
+    Write-Host ("{0} 件" -f $total) -ForegroundColor Red
+    Write-Host ""
+    Write-Host ("  本日:{0,4}件  /  過去7日:{1,4}件  /  過去30日:{2,4}件" -f $todayCnt, $weekCnt, $monCnt) -ForegroundColor Yellow
+    Write-Sep
+
+    # イベントをパース
+    $parsed = $events | ForEach-Object {
+        $appName  = '不明'
+        $filePath = '不明'
+        try {
+            $xml  = [xml]$_.ToXml()
+            $data = $xml.Event.EventData.Data
+            foreach ($d in $data) {
+                if ($d.Name -match 'Process|Application') {
+                    $appName = [System.IO.Path]::GetFileName(($d.'#text' -replace '"','').Trim())
+                }
+                if ($d.Name -match 'Path|File|Target') {
+                    $filePath = ($d.'#text' -replace '"','').Trim()
+                }
+            }
+        } catch {
+            $m = $_.Message
+            $a = [regex]::Match($m, '(?:Application Name|Process Name|アプリケーション):\s*(.+)')
+            $f = [regex]::Match($m, '(?:Target|Path|ファイル|パス):\s*(.+)')
+            if ($a.Success) { $appName  = [System.IO.Path]::GetFileName($a.Groups[1].Value.Trim()) }
+            if ($f.Success) { $filePath = $f.Groups[1].Value.Trim() }
+        }
+        [PSCustomObject]@{ Time = $_.TimeCreated; AppName = $appName; Path = $filePath }
+    }
+
+    # 最近15件の詳細
+    Write-Host "  ▼ 最近のブロック記録 (最新15件):" -ForegroundColor White
+    Write-Host ""
+    Write-Host ("  {0,-17} {1,-26} {2}" -f "日時", "ブロックされたアプリ", "対象パス") -ForegroundColor DarkGray
+    Write-Host ("  " + ('-' * 76)) -ForegroundColor DarkGray
+    $parsed | Select-Object -First 15 | ForEach-Object {
+        $app  = $_.AppName
+        if ($app.Length  -gt 24) { $app  = $app.Substring(0,21)  + '...' }
+        $path = $_.Path
+        if ($path.Length -gt 32) { $path = '...' + $path.Substring($path.Length - 29) }
+        Write-Host ("  {0,-17} {1,-26} {2}" -f $_.Time.ToString('MM/dd HH:mm:ss'), $app, $path)
+    }
+
+    Write-Sep
+
+    # ブロック頻度ランキング
+    Write-Host ""
+    Write-Host "  ▼ ブロック頻度 上位5アプリ:" -ForegroundColor Yellow
+    Write-Host ""
+    $parsed | Group-Object AppName | Sort-Object Count -Descending | Select-Object -First 5 | ForEach-Object {
+        $barLen = [Math]::Min($_.Count, 35)
+        $bar    = [string]::new([char]0x2588, $barLen)   # ████
+        $color  = if ($_.Count -ge 10) { 'Red' } elseif ($_.Count -ge 3) { 'Yellow' } else { 'White' }
+        Write-Host ("    {0,4}回  " -f $_.Count) -NoNewline
+        Write-Host $bar -NoNewline -ForegroundColor $color
+        Write-Host ("  {0}" -f $_.Name)
+    }
+
+    Write-Host ""
+    Write-Sep
+    Write-Host "  ヒント: 業務ツール・DLアプリがブロックされている場合は..." -ForegroundColor Cyan
+    Write-Host "  メインメニュー [4] 個別設定 → [1] CFA → 許可アプリに追加すると解除できます。" -ForegroundColor Cyan
+    Write-Host ""
+    Pause-Any
+}
+
 # メインメニュー
 function Show-MainMenu {
     while ($true) {
@@ -344,19 +927,21 @@ function Show-MainMenu {
         $scoreColor = if ($score -ge 4) { 'Green' } elseif ($score -ge 2) { 'Yellow' } else { 'Red' }
         Write-Host ("  防衛スコア: {0}/5" -f $score) -ForegroundColor $scoreColor
         Write-Host ""
-        Write-Host "  [1] 診断           - セキュリティ状態を確認" -ForegroundColor White
-        Write-Host "  [2] 全防衛設定を適用 - ランサムウェア対策を一括有効化" -ForegroundColor Green
-        Write-Host "  [3] 全設定を解除   - 設定を元に戻す" -ForegroundColor Magenta
-        Write-Host "  [4] 個別設定       - 機能を個別にON/OFF" -ForegroundColor White
+        Write-Host "  [1] 診断             - セキュリティ状態を確認" -ForegroundColor White
+        Write-Host "  [2] 全防衛設定を適用   - ランサムウェア対策を一括有効化" -ForegroundColor Green
+        Write-Host "  [3] 全設定を解除       - 設定を元に戻す" -ForegroundColor Magenta
+        Write-Host "  [4] 個別設定           - 機能を個別にON/OFF" -ForegroundColor White
+        Write-Host "  [5] ブロック履歴ログ   - CFA/SMB/RDP/USB/UAC のブロック記録を確認" -ForegroundColor Cyan
         Write-Sep
         Write-Host "  [Q] 終了" -ForegroundColor DarkGray
         Write-Host ""
-        $c = Read-Host "  選択 (1/2/3/4/Q)"
+        $c = Read-Host "  選択 (1/2/3/4/5/Q)"
         switch ($c.ToUpper()) {
             '1' { Show-Diagnosis }
             '2' { Invoke-ApplyAll }
             '3' { Invoke-UndoAll }
             '4' { Show-IndividualMenu }
+            '5' { Show-BlockLogMenu }
             'Q' {
                 Write-Host ""
                 Write-Host "  終了します。" -ForegroundColor DarkGray
