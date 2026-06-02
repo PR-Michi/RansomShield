@@ -1,5 +1,5 @@
 ﻿# ===========================================================
-# RansomShield.ps1  v1.1.0
+# RansomShield.ps1  v1.1.1
 # ===========================================================
 # (C) 2026  All rights reserved.
 # ※ このスクリプトはPS2EXEでEXE化して配布してください
@@ -21,7 +21,7 @@ if (-not $isAdmin) {
 #endregion
 
 #region --- 定数 ---
-$VERSION = '1.1.0'
+$VERSION = '1.1.1'
 $PRODUCT = 'RansomShield'
 $LINE    = '=' * 56
 $SEP     = '-' * 56
@@ -289,6 +289,106 @@ function Disable-Cfa {
     Write-Host "    コントロールドフォルダーアクセス 無効化完了" -ForegroundColor Magenta
 }
 
+function Show-CfaAllowMenu {
+    # よく使うアプリの候補リスト
+    $candidates = [ordered]@{
+        'Python 3.12 (システム)' = "C:\Users\$env:USERNAME\AppData\Local\Programs\Python\Python312\python.exe"
+        'Python 3.11 (システム)' = "C:\Users\$env:USERNAME\AppData\Local\Programs\Python\Python311\python.exe"
+        'Python 3.10 (システム)' = "C:\Users\$env:USERNAME\AppData\Local\Programs\Python\Python310\python.exe"
+        'venv Python (このフォルダ)' = (Join-Path (Split-Path $MyInvocation.ScriptName) '.venv\Scripts\python.exe')
+        'yt-dlp.exe' = "C:\Users\$env:USERNAME\AppData\Local\Programs\Python\Python312\Scripts\yt-dlp.exe"
+        'ffmpeg.exe' = 'C:\ffmpeg\bin\ffmpeg.exe'
+    }
+
+    while ($true) {
+        Write-Header
+        Write-Host "  ■ CFA 許可アプリ管理" -ForegroundColor Yellow
+        Write-Host "  ここに登録したアプリは、保護フォルダへの書き込みが許可されます。" -ForegroundColor DarkGray
+        Write-Sep
+
+        $current = @((Get-MpPreference).ControlledFolderAccessAllowedApplications)
+        if ($current.Count -eq 0 -or ($current.Count -eq 1 -and $current[0] -eq '')) {
+            Write-Host "  登録済み許可アプリ: なし" -ForegroundColor Yellow
+        } else {
+            Write-Host "  登録済み許可アプリ:" -ForegroundColor White
+            for ($i = 0; $i -lt $current.Count; $i++) {
+                $exists = Test-Path $current[$i]
+                $mark   = if ($exists) { '  ' } else { '?' }
+                Write-Host ("    [{0}] {1} {2}" -f ($i + 1), $mark, $current[$i]) -ForegroundColor Cyan
+            }
+        }
+
+        Write-Host ""
+        Write-Sep
+        Write-Host "  [A] パスを直接入力して追加"
+        Write-Host "  [Q] よく使うアプリから選んで追加"
+        Write-Host "  [D] 削除"
+        Write-Host "  [B] 戻る"
+        Write-Host ""
+        $c = Read-Host "  選択"
+
+        switch ($c.ToUpper()) {
+            'A' {
+                $path = (Read-Host "  追加するアプリの完全パスを入力").Trim()
+                if ($path -and (Test-Path $path)) {
+                    Add-MpPreference -ControlledFolderAccessAllowedApplications $path
+                    Write-Host ("  {0} を許可リストに追加しました。" -f $path) -ForegroundColor Green
+                } elseif ($path) {
+                    $yn = Read-Host "  ファイルが見つかりません。それでも追加しますか？ (Y/N)"
+                    if ($yn.ToUpper() -eq 'Y') {
+                        Add-MpPreference -ControlledFolderAccessAllowedApplications $path
+                        Write-Host ("  {0} を追加しました。" -f $path) -ForegroundColor Yellow
+                    }
+                }
+                Pause-Any
+            }
+            'Q' {
+                Write-Host ""
+                Write-Host "  よく使うアプリ:" -ForegroundColor White
+                $keys = @($candidates.Keys)
+                for ($i = 0; $i -lt $keys.Count; $i++) {
+                    $p = $candidates[$keys[$i]]
+                    $mark = if (Test-Path $p) { '[存在]' } else { '[なし]' }
+                    Write-Host ("    [{0}] {1} {2}" -f ($i + 1), $mark, $keys[$i]) -ForegroundColor Cyan
+                    Write-Host ("         {0}" -f $p) -ForegroundColor DarkGray
+                }
+                Write-Host "    [B] キャンセル"
+                Write-Host ""
+                $sel = Read-Host "  番号を選択"
+                if ($sel.ToUpper() -ne 'B') {
+                    $idx = [int]$sel - 1
+                    if ($idx -ge 0 -and $idx -lt $keys.Count) {
+                        $path = $candidates[$keys[$idx]]
+                        if (Test-Path $path) {
+                            Add-MpPreference -ControlledFolderAccessAllowedApplications $path
+                            Write-Host ("  {0} を追加しました。" -f $path) -ForegroundColor Green
+                        } else {
+                            Write-Host "  ファイルが見つかりません: $path" -ForegroundColor Red
+                        }
+                    }
+                }
+                Pause-Any
+            }
+            'D' {
+                $current = @((Get-MpPreference).ControlledFolderAccessAllowedApplications)
+                if ($current.Count -eq 0 -or ($current.Count -eq 1 -and $current[0] -eq '')) {
+                    Write-Host "  削除するアプリがありません。" -ForegroundColor Yellow
+                } else {
+                    $idx = [int](Read-Host "  削除する番号を入力") - 1
+                    if ($idx -ge 0 -and $idx -lt $current.Count) {
+                        Remove-MpPreference -ControlledFolderAccessAllowedApplications $current[$idx]
+                        Write-Host ("  {0} を削除しました。" -f $current[$idx]) -ForegroundColor Magenta
+                    } else {
+                        Write-Host "  無効な番号です。" -ForegroundColor Red
+                    }
+                }
+                Pause-Any
+            }
+            'B' { return }
+        }
+    }
+}
+
 # -- RDP --
 function Disable-Rdp {
     $path = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
@@ -437,11 +537,28 @@ function Show-IndividualMenu {
         $c = Read-Host "  番号を選択"
         switch ($c.ToUpper()) {
             '1' {
-                if ($s.cfa) { Disable-Cfa } else {
+                if ($s.cfa) {
+                    # CFA ON 時: サブメニューで「解除」or「許可アプリ管理」を選択
+                    Write-Header
+                    Write-Host "  ■ CFA（コントロールドフォルダーアクセス）設定" -ForegroundColor Yellow
+                    Write-Sep
+                    $allowedCount = @((Get-MpPreference).ControlledFolderAccessAllowedApplications | Where-Object { $_ }).Count
+                    Write-Host ("  許可済みアプリ: {0}件" -f $allowedCount) -ForegroundColor Cyan
+                    Write-Host ""
+                    Write-Host "  [1] CFAを無効化"
+                    Write-Host "  [2] 許可アプリ管理 - 書き込みを許可するアプリを追加・削除"
+                    Write-Host "  [B] 戻る"
+                    Write-Host ""
+                    $sub = Read-Host "  選択"
+                    switch ($sub.ToUpper()) {
+                        '1' { Disable-Cfa; Pause-Any }
+                        '2' { Show-CfaAllowMenu }
+                    }
+                } else {
                     Write-Host "  【注意】一部アプリが保護フォルダーに書き込めなくなる場合があります。" -ForegroundColor Yellow
                     Enable-Cfa
+                    Pause-Any
                 }
-                Pause-Any
             }
             '2' {
                 if ($s.smb) {

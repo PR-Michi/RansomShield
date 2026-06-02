@@ -297,6 +297,59 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ---
 
+### 操作ガイド
+
+#### CFA 許可アプリ管理（業務ツール・ダウンロードアプリなど）
+
+CFA有効時に特定アプリが保護フォルダーへ書き込めない場合、許可リストに追加できます。
+
+```
+[4] 個別設定 → [1] CFA → [2] 許可アプリ管理
+```
+
+| 操作 | 手順 |
+|------|------|
+| よく使うアプリを追加 | `[Q]` を選択 → 一覧からPython・yt-dlp等を番号で選ぶ |
+| パスを直接指定して追加 | `[A]` を選択 → 完全パスを入力（例: `C:\tools\myapp.exe`）|
+| 許可を取り消す | `[D]` を選択 → 番号を入力 |
+
+**よく使うアプリ候補（自動検出）:**
+
+```
+  [1] [存在] Python 3.12 (システム)
+  [2] [なし] Python 3.11 (システム)
+  [4] [存在] venv Python (このフォルダ)
+  [5] [存在] yt-dlp.exe
+  [6] [なし] ffmpeg.exe
+```
+
+`[存在]` マークはPC上に実際にファイルがある場合のみ表示されます。
+
+---
+
+#### SMB 信頼デバイス管理（複合機・プリンターなど）
+
+SMBブロック有効時に、特定デバイスからのアクセスだけを許可できます。  
+スキャン保存（複合機 → PC共有フォルダへPDF転送）などの業務用途に使用します。
+
+```
+[4] 個別設定 → [2] SMB → [2] 信頼デバイス管理
+```
+
+| 操作 | 手順 |
+|------|------|
+| IPアドレスを登録 | `[A]` を選択 → IPアドレスを入力（例: `192.168.1.100`）|
+| 登録を取り消す | `[D]` を選択 → 番号を入力 |
+
+**仕組み:** Windowsファイアウォールのブロックルール `RemoteAddress` を信頼IPの補集合で再構築します。  
+「BLOCKルールがALLOWルールより優先」という仕様のため、通常のALLOW追加では機能しない問題をこの方式で解決しています。
+
+> **例:** 複合機 `192.168.1.100` を登録すると…  
+> ブロック対象 = `0.0.0.0–192.168.1.99` と `192.168.1.101–255.255.255.255`  
+> （複合機のIPだけがブロック対象から外れる）
+
+---
+
 ### 動作環境
 
 - Windows 10 / 11
@@ -321,6 +374,11 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ---
 
 ### 変更履歴
+
+#### v1.1.1 (2026-06-02)
+- **新機能: CFA 許可アプリ管理**  
+  個別設定 `[4]→[1] CFA` から保護フォルダへの書き込みを許可するアプリを追加・削除できるようになりました。  
+  Python・yt-dlp・ffmpegなどよく使うアプリの候補一覧から番号で選ぶか、フルパスを直接入力して登録できます。
 
 #### v1.1.0 (2026-06-02)
 - **新機能: SMB 信頼デバイス管理**  
@@ -425,6 +483,49 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ---
 
+### Operation Guide
+
+#### CFA Allowed App Management (business tools, download apps, etc.)
+
+If an app cannot write to protected folders while CFA is enabled, add it to the allowlist.
+
+```
+[4] Individual Settings → [1] CFA → [2] Allowed App Management
+```
+
+| Action | Steps |
+|--------|-------|
+| Add from preset list | Select `[Q]` → choose Python, yt-dlp, etc. by number |
+| Add by full path | Select `[A]` → enter full path (e.g. `C:\tools\myapp.exe`) |
+| Remove a permission | Select `[D]` → enter the item number |
+
+Files marked `[Found]` are confirmed to exist on your PC.
+
+---
+
+#### SMB Trusted Device Management (MFP / printers)
+
+While SMB block is active, you can allow access from specific devices only.  
+This is useful for scan-to-folder workflows (MFP → PC shared folder → PDF/JPG transfer).
+
+```
+[4] Individual Settings → [2] SMB → [2] Trusted Device Management
+```
+
+| Action | Steps |
+|--------|-------|
+| Register an IP address | Select `[A]` → enter IP (e.g. `192.168.1.100`) |
+| Remove a registration | Select `[D]` → enter the item number |
+
+**How it works:** The firewall BLOCK rule's `RemoteAddress` is rebuilt as the complement of trusted IPs.  
+This approach bypasses the Windows Firewall rule where BLOCK always overrides ALLOW.
+
+> **Example:** Registering MFP `192.168.1.100` results in:  
+> Block range = `0.0.0.0–192.168.1.99` and `192.168.1.101–255.255.255.255`  
+> (Only the MFP's IP is excluded from the block)
+
+---
+
 ### Requirements
 
 - Windows 10 / 11
@@ -449,6 +550,11 @@ See [DISCLAIMER.md](DISCLAIMER.md) for full details.
 ---
 
 ### Changelog
+
+#### v1.1.1 (2026-06-02)
+- **New: CFA Allowed App Management**  
+  From Individual Settings `[4]→[1] CFA`, you can now add or remove apps allowed to write to protected folders.  
+  Choose from a preset list (Python, yt-dlp, ffmpeg, etc.) by number, or enter a full path manually.
 
 #### v1.1.0 (2026-06-02)
 - **New: SMB Trusted Device Management**  
