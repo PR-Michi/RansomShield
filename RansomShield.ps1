@@ -1,5 +1,5 @@
 ﻿# ===========================================================
-# RansomShield.ps1  v1.1.1
+# RansomShield.ps1  v1.2.0
 # ===========================================================
 # (C) 2026  All rights reserved.
 # ※ このスクリプトはPS2EXEでEXE化して配布してください
@@ -21,7 +21,7 @@ if (-not $isAdmin) {
 #endregion
 
 #region --- 定数 ---
-$VERSION = '1.1.1'
+$VERSION = '1.2.0'
 $PRODUCT = 'RansomShield'
 $LINE    = '=' * 56
 $SEP     = '-' * 56
@@ -1069,5 +1069,85 @@ function Show-MainMenu {
 }
 #endregion
 
+#region --- INI読み込みヘルパー ---
+function Read-IniFile([string]$Path) {
+    $ini = [ordered]@{}
+    if (-not (Test-Path $Path)) { return $ini }
+    $section = ''
+    foreach ($line in Get-Content $Path -Encoding UTF8) {
+        $line = $line.Trim()
+        if ($line -match '^\[(.+)\]$')       { $section = $matches[1]; $ini[$section] = [ordered]@{} }
+        elseif ($line -match '^([^=;]+)=(.*)') {
+            $key = $matches[1].Trim()
+            $val = $matches[2].Trim()
+            if ($section -and $ini[$section]) { $ini[$section][$key] = $val }
+        }
+    }
+    return $ini
+}
+
+function Invoke-ConfigApply([string]$IniPath) {
+    $ini = Read-IniFile $IniPath
+    $sec = $ini['Security']
+
+    Write-Host "  INI設定を適用します: $IniPath" -ForegroundColor Cyan
+    Write-Host ""
+
+    # SMB 信頼IP（先にレジストリに保存してからSMBルールを構築する）
+    $trustedRaw = if ($ini['SmbTrustedIPs']) { $ini['SmbTrustedIPs']['IPs'] } else { '' }
+    if ($trustedRaw) {
+        $ips = @($trustedRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($ips.Count -gt 0) {
+            Save-SmbTrustedIPs -IPs $ips
+            Write-Host ("  SMB信頼IP登録: {0}" -f ($ips -join ', ')) -ForegroundColor Cyan
+        }
+    }
+
+    # CFA 許可アプリ（先に追加してからCFAを有効化する）
+    $appsRaw = if ($ini['CfaAllowedApps']) { $ini['CfaAllowedApps']['Apps'] } else { '' }
+    if ($appsRaw) {
+        $apps = @($appsRaw -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        foreach ($app in $apps) {
+            if (Test-Path $app) {
+                Add-MpPreference -ControlledFolderAccessAllowedApplications $app -EA SilentlyContinue
+                Write-Host ("  CFA許可アプリ追加: {0}" -f $app) -ForegroundColor Cyan
+            } else {
+                Write-Host ("  CFA許可アプリ: ファイルなしのためスキップ: {0}" -f $app) -ForegroundColor Yellow
+            }
+        }
+    }
+
+    # 各設定を適用
+    if (-not $sec -or $sec['SMB'] -ne '0') { Enable-SmbHardening }
+    if (-not $sec -or $sec['CFA'] -ne '0') { Enable-Cfa }
+    if (-not $sec -or $sec['RDP'] -ne '0') { Disable-Rdp }
+    if (-not $sec -or $sec['AutoRun'] -ne '0') { Disable-AutoRun }
+    if (-not $sec -or $sec['UAC'] -ne '0') { Set-UacMax }
+
+    Write-Host ""
+    Write-Host "  >> INI設定の適用が完了しました。" -ForegroundColor Green
+
+    # Windowsイベントログに記録
+    $writeLog = if ($ini['Log']) { $ini['Log']['WriteEventLog'] } else { '1' }
+    if ($writeLog -ne '0') {
+        try {
+            $src = 'RansomShield'
+            if (-not [System.Diagnostics.EventLog]::SourceExists($src)) {
+                [System.Diagnostics.EventLog]::CreateEventSource($src, 'Application')
+            }
+            Write-EventLog -LogName Application -Source $src -EventId 1000 -EntryType Information `
+                -Message ("RansomShield v{0}: INI設定適用完了 ({1})" -f $VERSION, (Split-Path $IniPath -Leaf))
+        } catch { }
+    }
+}
+#endregion
+
 # --- エントリポイント ---
-Show-MainMenu
+param([string]$Config = '')
+
+if ($Config) {
+    # サイレントモード: INIを読み込んで設定を適用し終了
+    Invoke-ConfigApply -IniPath $Config
+} else {
+    Show-MainMenu
+}
